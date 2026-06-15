@@ -19,7 +19,7 @@ spec:
         - name: nginx
           # CHANGE ME: replace OWNER/REPO with your GitHub repo (lowercase),
           # and bump the tag to match the VERSION you released.
-          image: ghcr.io/soniabou/simpleapp:latest 
+          image: soniabou/simpleapp:latest 
           ports:
             - containerPort: 8080
           readinessProbe:
