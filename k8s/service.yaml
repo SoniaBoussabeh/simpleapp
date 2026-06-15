@@ -4,7 +4,7 @@ metadata:
   name: simple-app
   namespace: simple-app
 spec:
-  type: ClusterIP
+  type: LoadBalancer
   selector:
     app: simple-app
   ports:
