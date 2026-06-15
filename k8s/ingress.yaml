@@ -1,0 +1,19 @@
+# Optional. Requires an ingress controller (e.g. ingress-nginx) in the cluster.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: simple-app
+  namespace: simple-app
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: simple-app.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: simple-app
+                port:
+                  number: 80
