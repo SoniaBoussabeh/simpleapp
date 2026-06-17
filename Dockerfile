@@ -2,7 +2,7 @@
 FROM nginxinc/nginx-unprivileged:1.27-alpine
 
 # Version is passed in at build time (CI reads it from the VERSION file)
-ARG APP_VERSION=0.1.0-dev
+ARG APP_VERSION=0.1.0-prod
 
 # Static content + nginx config
 COPY app/ /usr/share/nginx/html/
