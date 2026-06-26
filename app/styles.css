@@ -38,3 +38,22 @@ ul { margin: 0; padding-left: 1.2rem; }
 li { margin: 0.25rem 0; }
 .version { margin-top: 1.5rem; color: var(--muted); font-size: 0.9rem; }
 #version { color: var(--accent); font-weight: 600; }
+
+.pager {
+  display: flex;
+  align-items: center;
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid #334155;
+}
+.pager-spacer { flex: 1; }
+.pager a {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 600;
+  padding: 0.4rem 0.9rem;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  transition: background 0.15s ease;
+}
+.pager a:hover { background: #0b1220; }
