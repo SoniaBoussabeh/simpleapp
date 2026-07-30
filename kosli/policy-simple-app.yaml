@@ -1,0 +1,47 @@
+_schema: https://docs.kosli.com/schemas/policy/v1
+
+# Kosli ENVIRONMENT policy for simple-app.
+#
+# This evaluates what is ACTUALLY RUNNING in the cluster, continuously, on every
+# snapshot. It is not a pipeline gate — see kosli/README.md §5 for how this differs
+# from the Harness On Save / On Run policies you already have.
+#
+#   kosli create policy simple-app-policy kosli/policy-simple-app.yaml \
+#     --description "simple-app runtime requirements" --type env
+#   kosli attach-policy simple-app-policy --environment simple-app-prod
+#
+# Policies are immutable: re-running `create policy` with the same name creates a new
+# version. Use --comment to record why it changed.
+
+artifacts:
+  # PHASE 1 — start here.
+  #
+  # Every running artifact must belong to a Kosli Flow with provenance, i.e. some
+  # pipeline attested "I built this digest from this commit".
+  #
+  # This is the single highest-value rule and the one Harness policies structurally
+  # cannot provide: it catches anything that reached the cluster WITHOUT going through
+  # the pipeline (a manual `kubectl set image`, a rollback to an untracked digest, an
+  # image pushed over an existing tag).
+  provenance:
+    required: true
+
+  # PHASE 2 — enable only AFTER phase 1 reports compliant.
+  #
+  # Requires the artifact's Trail to satisfy kosli/flow-template.yml, which currently
+  # means an approved GitHub pull request must exist for the commit.
+  #
+  # Enabling this before the `kosli attest pullrequest github` step is running will
+  # hold the environment non-compliant.
+  #
+  # trail-compliance:
+  #   required: true
+
+  # PHASE 3 — add per-attestation requirements as the pipeline grows.
+  #
+  # Each entry must also exist in kosli/flow-template.yml, or it can never be satisfied.
+  # There are currently no tests in this repo, so nothing is listed here yet.
+  #
+  # attestations:
+  #   - name: pull-request
+  #     type: pull_request

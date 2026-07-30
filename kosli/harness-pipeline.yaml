@@ -1,0 +1,264 @@
+# Harness pipeline "Testkosli" (clone of App2) with Kosli steps added.
+#
+# Added steps are marked  # <-- KOSLI.  Existing steps are unchanged.
+#
+# PREREQUISITE: kosli/ must be committed and pushed to main before running this.
+# The Kosli Begin Trail step reads /harness/test/kosli/flow-template.yml from the
+# GitClone, which clones branch main. If it isn't pushed, that step fails.
+#
+# Read kosli/HARNESS-NOTES.md first — there are two problems inherited from the
+# original pipeline, one of which makes the dashboard flap red on every build.
+pipeline:
+  projectIdentifier: foodtrucksre
+  orgIdentifier: default
+  stages:
+    - stage:
+        name: Build
+        identifier: Build
+        type: CI
+        spec:
+          cloneCodebase: false
+          execution:
+            steps:
+              - step:
+                  type: Run
+                  name: Echo Welcome Message
+                  identifier: Echo_Welcome_Message
+                  spec:
+                    connectorRef: account.dockerio
+                    image: alpine:latest
+                    shell: Sh
+                    command: echo "Welcome to Harness CI"
+
+              - step:
+                  type: GitClone
+                  name: GitClone_1
+                  identifier: GitClone_1
+                  spec:
+                    connectorRef: account.githubsonia
+                    repoName: simpleapp
+                    cloneDirectory: /harness/test
+                    build:
+                      type: branch
+                      spec:
+                        branch: main
+
+              # <-- KOSLI: install the CLI into the shared /harness volume and
+              # capture the commit SHA. Needed because cloneCodebase is false, so
+              # <+codebase.commitSha> is not available in this pipeline.
+              - step:
+                  type: Run
+                  name: Kosli Setup
+                  identifier: Kosli_Setup
+                  spec:
+                    connectorRef: account.dockerio
+                    image: alpine/git:latest
+                    shell: Sh
+                    command: |-
+                      set -eu
+                      KOSLI_VERSION=2.36.1
+                      apk add --no-cache curl >/dev/null
+                      mkdir -p /harness/bin
+                      tmp=$(mktemp -d)
+                      curl -fsSL "https://github.com/kosli-dev/cli/releases/download/v${KOSLI_VERSION}/kosli_${KOSLI_VERSION}_linux_amd64.tar.gz" | tar -xz -C "$tmp"
+                      mv "$tmp/kosli" /harness/bin/kosli
+                      chmod +x /harness/bin/kosli
+                      # fails loudly here rather than mysteriously three steps later
+                      /harness/bin/kosli version
+                      export COMMIT_SHA=$(git -C /harness/test rev-parse HEAD)
+                      echo "commit sha: $COMMIT_SHA"
+                    outputVariables:
+                      - name: COMMIT_SHA
+
+              - step:
+                  type: Run
+                  name: Read Version
+                  identifier: Read_Version
+                  spec:
+                    connectorRef: account.dockerio
+                    image: alpine:latest
+                    shell: Sh
+                    command: |-
+                      export APP_VERSION=$(tr -d ' \t\r\n' < /harness/test/VERSION)
+                      echo "App version: $APP_VERSION"
+                    outputVariables:
+                      - name: APP_VERSION
+
+              # <-- KOSLI: create/update the flow from the versioned template, then
+              # open a trail for this commit. `create flow` is idempotent, so the
+              # template in git stays the single source of truth.
+              - step:
+                  type: Run
+                  name: Kosli Begin Trail
+                  identifier: Kosli_Begin_Trail
+                  spec:
+                    connectorRef: account.dockerio
+                    image: alpine:latest
+                    shell: Sh
+                    envVariables:
+                      KOSLI_API_TOKEN: <+secrets.getValue("account.kosli_api_token")>
+                      KOSLI_ORG: SDL-Sandbox
+                      KOSLI_FLOW: simple-app
+                    command: |-
+                      set -eu
+                      SHA=<+execution.steps.Kosli_Setup.output.outputVariables.COMMIT_SHA>
+                      /harness/bin/kosli create flow simple-app \
+                        --description "simple-app delivery process" \
+                        --template-file /harness/test/kosli/flow-template.yml
+                      /harness/bin/kosli begin trail "$SHA" \
+                        --commit "$SHA" \
+                        --repo-provider github \
+                        --repository "SoniaBoussabeh/simpleapp" \
+                        --repo-url "https://github.com/SoniaBoussabeh/simpleapp" \
+                        --repo-id "1269630228" \
+                        --description "simple-app build <+pipeline.sequenceId>"
+
+              - step:
+                  type: BuildAndPushDockerRegistry
+                  name: BuildAndPushDockerRegistry_1
+                  identifier: BuildAndPushDockerRegistry_1
+                  spec:
+                    connectorRef: account.dockerio
+                    repo: soniabou/simpleapp
+                    tags:
+                      - <+execution.steps.Read_Version.output.outputVariables.APP_VERSION>
+                      - latest
+                    buildArgs:
+                      APP_VERSION: <+execution.steps.Read_Version.output.outputVariables.APP_VERSION>
+                    context: /harness/test
+                    dockerfile: /harness/test/Dockerfile
+
+              # <-- KOSLI: must run AFTER the push. --artifact-type oci resolves the
+              # real sha256 digest from Docker Hub; that digest is the only thing the
+              # cluster reporter can see, so it is the join key.
+              - step:
+                  type: Run
+                  name: Kosli Attest Artifact
+                  identifier: Kosli_Attest_Artifact
+                  spec:
+                    connectorRef: account.dockerio
+                    image: alpine:latest
+                    shell: Sh
+                    envVariables:
+                      KOSLI_API_TOKEN: <+secrets.getValue("account.kosli_api_token")>
+                      KOSLI_ORG: SDL-Sandbox
+                      KOSLI_FLOW: simple-app
+                    command: |-
+                      set -eu
+                      SHA=<+execution.steps.Kosli_Setup.output.outputVariables.COMMIT_SHA>
+                      VER=<+execution.steps.Read_Version.output.outputVariables.APP_VERSION>
+                      /harness/bin/kosli attest artifact "docker.io/soniabou/simpleapp:${VER}" \
+                        --artifact-type oci \
+                        --name simple-app \
+                        --trail "$SHA" \
+                        --commit "$SHA" \
+                        --commit-url "https://github.com/SoniaBoussabeh/simpleapp/commit/${SHA}" \
+                        --build-url "<+pipeline.executionUrl>" \
+                        --repo-root /harness/test
+
+              # <-- KOSLI: the only step that calls the GitHub API. Satisfies the
+              # `pull-request` attestation in flow-template.yml.
+              # Swap `attest` for `assert` to FAIL the build when no approved PR exists.
+              - step:
+                  type: Run
+                  name: Kosli Attest Pull Request
+                  identifier: Kosli_Attest_PullRequest
+                  spec:
+                    connectorRef: account.dockerio
+                    image: alpine:latest
+                    shell: Sh
+                    envVariables:
+                      KOSLI_API_TOKEN: <+secrets.getValue("account.kosli_api_token")>
+                      KOSLI_ORG: SDL-Sandbox
+                      KOSLI_FLOW: simple-app
+                      KOSLI_GITHUB_TOKEN: <+secrets.getValue("account.github_token")>
+                    command: |-
+                      set -eu
+                      SHA=<+execution.steps.Kosli_Setup.output.outputVariables.COMMIT_SHA>
+                      /harness/bin/kosli attest pullrequest github \
+                        --name pull-request \
+                        --github-org SoniaBoussabeh \
+                        --repository simpleapp \
+                        --trail "$SHA" \
+                        --commit "$SHA" \
+                        --build-url "<+pipeline.executionUrl>"
+
+          infrastructure:
+            type: KubernetesDirect
+            spec:
+              connectorRef: account.SRETrainingCluster
+              # CHANGED: was `simple-app`, which is the namespace the app runs in and
+              # the namespace the Kosli reporter is scoped to. CI pods landing there
+              # get reported as unprovenanced artifacts and flip simple-app-prod to
+              # NON-COMPLIANT during every build. See kosli/HARNESS-NOTES.md.
+              namespace: harness-ci
+              automountServiceAccountToken: true
+              nodeSelector: {}
+              os: Linux
+
+    - stage:
+        name: Deploy
+        identifier: Deploy
+        type: Deployment
+        spec:
+          deploymentType: Kubernetes
+          service:
+            serviceRef: simpleapp
+            serviceInputs:
+              serviceDefinition:
+                type: Kubernetes
+                spec:
+                  artifacts:
+                    primary:
+                      sources:
+                        - identifier: dockerimage
+                          type: DockerRegistry
+                          spec:
+                            tag: <+pipeline.stages.Build.spec.execution.steps.Read_Version.output.outputVariables.APP_VERSION>
+          environment:
+            environmentRef: prod_Env
+            deployToAll: false
+            infrastructureDefinitions:
+              - identifier: simpleappinfra
+          execution:
+            steps:
+              - step:
+                  type: Policy
+                  name: Pre-Deploy Version Check
+                  identifier: PreDeployVersionCheck
+                  spec:
+                    policySets:
+                      - devprod
+                    type: Custom
+                    policySpec:
+                      payload: "{\"version\": \"<+pipeline.stages.Build.spec.execution.steps.Read_Version.output.outputVariables.APP_VERSION>\"}"
+                  timeout: 10m
+              - step:
+                  type: K8sRollingDeploy
+                  name: Rolling Deployment
+                  identifier: RollingDeployment
+                  spec:
+                    skipDryRun: false
+                    pruningEnabled: false
+                  timeout: 10m
+            rollbackSteps:
+              - step:
+                  type: K8sRollingRollback
+                  name: Rolling Rollback
+                  identifier: RollingRollback
+                  spec:
+                    pruningEnabled: false
+                  timeout: 10m
+        tags: {}
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: StageRollback
+  allowStageExecutions: true
+  tags: {}
+  # Targeting the cloned test pipeline. To apply the same steps to App2 later,
+  # change these two lines back to App2 — nothing else differs.
+  identifier: Testkosli
+  name: Testkosli

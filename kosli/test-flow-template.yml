@@ -1,0 +1,16 @@
+#
+# Deliberately minimal: declares the artifact but requires no attestations, so the
+# trail can go compliant without a PR attestation existing yet. Use it with a
+# throwaway flow name (simple-app-test) so hand-made provenance never lands in the
+# real `simple-app` flow that Harness will own.
+#
+# Not the production template — that is flow-template.yml.
+#
+# Also resolves an open question: the Kosli docs show `artifacts:` both nested under
+# `trail:` and at the top level in different examples. This uses the nested form. If
+# `kosli create flow` rejects it, the top-level form is correct.
+version: 1
+trail:
+  artifacts:
+    - name: simple-app
+      attestations: []
