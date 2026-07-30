@@ -18,11 +18,15 @@ simple-app/
 ├── Dockerfile                  # builds the image, bakes in VERSION
 ├── k8s/                        # Kubernetes manifests (namespace simple-app)
 │   ├── namespace.yaml
-│   ├── deployment.yaml
+│   ├── deployment.yaml         # Helm-templated: image comes from Harness
 │   ├── service.yaml
+│   ├── values.yaml             # image: <+artifact.image>  (Harness expression)
 │   └── ingress.yaml            # optional
-└── .github/workflows/ci.yaml   # build + push image to GHCR on push to main
+└── kosli/                      # Kosli compliance config — see KOSLI-SETUP.md
 ```
+
+CI/CD is **Harness**, not GitHub Actions — there is no `.github/workflows/` in this repo.
+The image is pushed to Docker Hub as `docker.io/soniabou/simpleapp:<VERSION>`.
 
 ## Run locally
 
@@ -34,8 +38,12 @@ docker run --rm -p 8080:8080 simple-app:dev
 
 ## Deploy to Kubernetes
 
-1. In `k8s/deployment.yaml`, set the image to your repo (lowercase) and tag:
-   `ghcr.io/<owner>/<repo>:0.1.0`
+Normally Harness does this. To apply by hand, note that `k8s/deployment.yaml` is
+Helm-templated (`image: {{ .Values.image }}`) and `k8s/values.yaml` holds a Harness
+expression, so plain `kubectl apply` will not resolve the image — substitute it first, e.g.
+`docker.io/soniabou/simpleapp:0.1.4`.
+
+1. Set the image to the tag you want to run.
 2. Apply:
 
 ```bash
@@ -56,11 +64,13 @@ kubectl -n simple-app port-forward svc/simple-app 8080:80
 Each visible change is one cycle:
 
 1. Edit content in `app/` (or bump a feature).
-2. Bump `VERSION` (e.g. `0.1.0` -> `0.2.0`).
-3. Commit + push -> CI builds `ghcr.io/<owner>/<repo>:<VERSION>`.
-4. Update the tag in `k8s/deployment.yaml` to the new VERSION, commit, and:
-   `kubectl apply -f k8s/deployment.yaml`
-5. `kubectl -n simple-app rollout status deploy/simple-app` and refresh the page.
+2. Bump `VERSION` (e.g. `0.1.4` -> `0.1.5`).
+3. Commit + push -> Harness builds `docker.io/soniabou/simpleapp:<VERSION>` and deploys it.
+4. `kubectl -n simple-app rollout status deploy/simple-app` and refresh the page.
+
+> **Always bump `VERSION`.** The tag is derived from it, so two commits at the same version
+> re-push the same tag over a different digest. That breaks artifact provenance in Kosli —
+> see [KOSLI-SETUP.md](KOSLI-SETUP.md) §10 gap 8.
 
 > Note: the deployment uses `readOnlyRootFilesystem: true` with writable
 > `emptyDir` mounts for `/tmp` and `/var/cache/nginx`. If your nginx variant
