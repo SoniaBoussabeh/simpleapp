@@ -107,6 +107,7 @@ pipeline:
                         --template-file /harness/test/kosli/flow-template.yml
                       /harness/bin/kosli begin trail "$SHA" \
                         --commit "$SHA" \
+                        --repo-root /harness/test \
                         --repo-provider github \
                         --repository "SoniaBoussabeh/simpleapp" \
                         --repo-url "https://github.com/SoniaBoussabeh/simpleapp" \
@@ -175,13 +176,81 @@ pipeline:
                     command: |-
                       set -eu
                       SHA=<+execution.steps.Kosli_Setup.output.outputVariables.COMMIT_SHA>
+                      # NOTE: this subcommand takes --origin-url, NOT --build-url.
+                      # --repo-root is required so it can read the local clone.
                       /harness/bin/kosli attest pullrequest github \
                         --name pull-request \
                         --github-org SoniaBoussabeh \
                         --repository simpleapp \
                         --trail "$SHA" \
                         --commit "$SHA" \
-                        --build-url "<+pipeline.executionUrl>"
+                        --repo-root /harness/test \
+                        --origin-url "<+pipeline.executionUrl>"
+
+              # <-- KOSLI: records a DECISION against control RCTL-043-test
+              # ("Source code review"). Controls receive decisions; there is no
+              # `kosli attest control`, and `attest pullrequest` has no --control
+              # flag, so this must be its own step.
+              #
+              # The verdict is DERIVED, not hardcoded: `assert pullrequest` exits
+              # non-zero when the commit has no approved PR. A control that always
+              # reports compliant is a rubber stamp — it produces audit evidence
+              # that proves nothing, which is worse than having no control.
+              - step:
+                  type: Run
+                  name: Kosli Attest Decision RCTL-043-test
+                  identifier: Kosli_Attest_Decision_RCTL043
+                  spec:
+                    connectorRef: account.dockerio
+                    image: alpine:latest
+                    shell: Sh
+                    envVariables:
+                      KOSLI_API_TOKEN: <+secrets.getValue("account.kosli_api_token")>
+                      KOSLI_ORG: SDL-Sandbox
+                      KOSLI_FLOW: simple-app
+                      KOSLI_GITHUB_TOKEN: <+secrets.getValue("account.github_token")>
+                    command: |-
+                      # NOTE: `set -u` only. With `set -e` the assert's non-zero
+                      # exit would abort the step before the decision is recorded,
+                      # so a real violation would go UNREPORTED rather than red.
+                      set -u
+                      SHA=<+execution.steps.Kosli_Setup.output.outputVariables.COMMIT_SHA>
+
+                      if /harness/bin/kosli assert pullrequest github \
+                           --github-org SoniaBoussabeh \
+                           --repository simpleapp \
+                           --commit "$SHA" \
+                           --repo-root /harness/test; then
+                        COMPLIANT=true
+                      else
+                        COMPLIANT=false
+                      fi
+                      echo "RCTL-043-test source code review compliant: $COMPLIANT"
+
+                      # NOTE: --compliant is a bool flag, so it MUST use the
+                      # `--compliant=$X` form. `--compliant $X` does not parse.
+                      # It is also [defaulted] — omit it and Kosli records a
+                      # compliant decision by itself. Always pass it explicitly.
+                      #
+                      # This command has NO --build-url / --commit-url (unlike
+                      # `attest artifact`); passing them fails with unknown flag.
+                      #
+                      # --repo-id/--repo-url/--repository are auto-set only in
+                      # GitHub Actions, GitLab, Bitbucket and Azure DevOps. Harness
+                      # is not on that list, so set all three explicitly or none of
+                      # the repo metadata is recorded.
+                      /harness/bin/kosli attest decision \
+                        --name source-code-review-decision \
+                        --control RCTL-043-test \
+                        --compliant="$COMPLIANT" \
+                        --trail "$SHA" \
+                        --commit "$SHA" \
+                        --repo-root /harness/test \
+                        --repo-provider github \
+                        --repository "SoniaBoussabeh/simpleapp" \
+                        --repo-url "https://github.com/SoniaBoussabeh/simpleapp" \
+                        --repo-id "1269630228" \
+                        --origin-url "<+pipeline.executionUrl>"
 
           infrastructure:
             type: KubernetesDirect
