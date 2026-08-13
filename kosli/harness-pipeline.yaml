@@ -192,10 +192,19 @@ pipeline:
               # `kosli attest control`, and `attest pullrequest` has no --control
               # flag, so this must be its own step.
               #
-              # The verdict is DERIVED, not hardcoded: `assert pullrequest` exits
-              # non-zero when the commit has no approved PR. A control that always
-              # reports compliant is a rubber stamp — it produces audit evidence
-              # that proves nothing, which is worse than having no control.
+              # The verdict is DERIVED, not hardcoded. A control that always reports
+              # compliant is a rubber stamp — audit evidence that proves nothing,
+              # which is worse than having no control at all.
+              #
+              # It queries the GitHub API directly rather than using
+              # `kosli assert pullrequest github`, which is the obvious choice but
+              # the wrong one — verified 2026-08-13. That command asserts only that
+              # a pull request EXISTS for the commit; it says nothing about
+              # approvals. RCTL-043-test requires review by a SECOND developer, so a
+              # self-merged PR must fail, and `assert` would pass it.
+              # It also rejects --repo-root (valid on `attest pullrequest`, not on
+              # `assert`), exiting non-zero before ever reaching GitHub — which
+              # recorded compliant=false on every run regardless of the PR.
               - step:
                   type: Run
                   name: Kosli Attest Decision RCTL-043-test
@@ -210,22 +219,63 @@ pipeline:
                       KOSLI_FLOW: simple-app
                       KOSLI_GITHUB_TOKEN: <+secrets.getValue("account.github_token")>
                     command: |-
-                      # NOTE: `set -u` only. With `set -e` the assert's non-zero
-                      # exit would abort the step before the decision is recorded,
-                      # so a real violation would go UNREPORTED rather than red.
+                      # `set -u` only, NOT `set -eu`: a non-compliant verdict must
+                      # still reach Kosli. `-e` would abort the step first and the
+                      # violation would go UNREPORTED rather than red.
                       set -u
-                      SHA=<+execution.steps.Kosli_Setup.output.outputVariables.COMMIT_SHA>
+                      apk add --no-cache curl jq >/dev/null
 
-                      if /harness/bin/kosli assert pullrequest github \
-                           --github-org SoniaBoussabeh \
-                           --repository simpleapp \
-                           --commit "$SHA" \
-                           --repo-root /harness/test; then
-                        COMPLIANT=true
-                      else
+                      SHA=<+execution.steps.Kosli_Setup.output.outputVariables.COMMIT_SHA>
+                      API="https://api.github.com/repos/SoniaBoussabeh/simpleapp"
+                      AUTH="Authorization: Bearer $KOSLI_GITHUB_TOKEN"
+                      ACCEPT="Accept: application/vnd.github+json"
+
+                      # Initialise for `set -u`: the no-PR branch leaves these unset.
+                      PR=""; AUTHOR=""; APPROVERS=""
+
+                      # If GitHub itself is unreachable or the token is bad, FAIL THE
+                      # STEP. A check that could not run must never be recorded as a
+                      # governance verdict — that is how "broken token" silently
+                      # becomes "developer skipped review" in an audit.
+                      PRS=$(curl -sSf -H "$AUTH" -H "$ACCEPT" "$API/commits/$SHA/pulls") || {
+                        echo "ERROR: GitHub API call failed. Check KOSLI_GITHUB_TOKEN and its repo scope."
+                        exit 1
+                      }
+                      PR=$(printf '%s' "$PRS" | jq -r '.[0].number // empty')
+
+                      if [ -z "$PR" ]; then
                         COMPLIANT=false
+                        REASON="No pull request found for commit $SHA - the change reached main without review."
+                      else
+                        AUTHOR=$(curl -sSf -H "$AUTH" -H "$ACCEPT" "$API/pulls/$PR" | jq -r '.user.login')
+                        REVIEWS=$(curl -sSf -H "$AUTH" -H "$ACCEPT" "$API/pulls/$PR/reviews?per_page=100")
+                        # Self-approval does not satisfy "a SECOND developer", so the
+                        # PR author is excluded. GitHub blocks self-approval via the
+                        # UI, but excluding explicitly keeps the rule self-evident.
+                        APPROVERS=$(printf '%s' "$REVIEWS" | jq -r --arg a "$AUTHOR" \
+                          '[.[] | select(.state=="APPROVED") | select(.user.login != $a) | .user.login] | unique | join(", ")')
+                        if [ -n "$APPROVERS" ]; then
+                          COMPLIANT=true
+                          REASON="PR #$PR (author: $AUTHOR) approved by: $APPROVERS"
+                        else
+                          COMPLIANT=false
+                          REASON="PR #$PR (author: $AUTHOR) has no APPROVED review from anyone other than the author."
+                        fi
                       fi
-                      echo "RCTL-043-test source code review compliant: $COMPLIANT"
+
+                      # Written to a file so the verdict's REASON becomes durable
+                      # evidence in Kosli, not just a line in a Harness log that
+                      # ages out.
+                      {
+                        echo "Control:   RCTL-043-test - Source code review"
+                        echo "Commit:    $SHA"
+                        echo "Compliant: $COMPLIANT"
+                        echo "Reason:    $REASON"
+                      } > /harness/rctl-043-evidence.txt
+                      cat /harness/rctl-043-evidence.txt
+
+                      printf '{"control":"RCTL-043-test","pull_request":"%s","author":"%s","approvers":"%s","compliant":%s}\n' \
+                        "$PR" "$AUTHOR" "$APPROVERS" "$COMPLIANT" > /harness/rctl-043-userdata.json
 
                       # NOTE: --compliant is a bool flag, so it MUST use the
                       # `--compliant=$X` form. `--compliant $X` does not parse.
@@ -243,6 +293,9 @@ pipeline:
                         --name source-code-review-decision \
                         --control RCTL-043-test \
                         --compliant="$COMPLIANT" \
+                        --description "$REASON" \
+                        --attachments /harness/rctl-043-evidence.txt \
+                        --user-data /harness/rctl-043-userdata.json \
                         --trail "$SHA" \
                         --commit "$SHA" \
                         --repo-root /harness/test \
