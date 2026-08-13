@@ -3,6 +3,13 @@ trail:
   attestations:
     - name: pull-request
       type: pull_request
+    # Decision recorded against Kosli control RCTL-043-test ("Source code review").
+    # `--name` on `kosli attest decision` must match this entry exactly.
+    - name: source-code-review-decision
+      type: decision
   artifacts:
+    # Required. `kosli attest artifact --name simple-app` is a REFERENCE to this
+    # entry, not a declaration — remove it and that step fails, the digest is
+    # never bound to the trail, and simple-app-prod loses provenance.
     - name: simple-app
       attestations: []
