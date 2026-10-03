@@ -376,15 +376,25 @@ pipeline:
                     command: |-
                       set -u
                       VER=<+pipeline.stages.Build.spec.execution.steps.Read_Version.output.outputVariables.APP_VERSION>
-                      URL="http://localhost:8080"
+                      # 127.0.0.1, NOT localhost: on Alpine `localhost` resolves to ::1
+                      # first, busybox wget does not fall back to IPv4, and nginx
+                      # listens on IPv4 only (`listen 8080;`) -> every test gets "".
+                      URL="http://127.0.0.1:8080"
                       OUT=/harness/test-results
                       mkdir -p "$OUT"
 
-                      # nginx needs a moment to start; give up after 30s.
+                      # nginx needs a moment to start; give up after 60s.
                       i=0
                       until wget -qO /dev/null "$URL/healthz" 2>/dev/null; do
                         i=$((i+1))
-                        if [ "$i" -ge 30 ]; then echo "app did not start"; break; fi
+                        if [ "$i" -ge 60 ]; then
+                          # Diagnose instead of guessing: the pod shares one network
+                          # namespace, so this lists what App Under Test listens on.
+                          echo "app did not answer on $URL after 60s. Listening ports:"
+                          netstat -tln 2>/dev/null || cat /proc/net/tcp
+                          wget -S -O- "$URL/healthz" 2>&1 | head -5
+                          break
+                        fi
                         sleep 1
                       done
 
