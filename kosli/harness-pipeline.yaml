@@ -305,26 +305,66 @@ pipeline:
                         --repo-id "1269630228" \
                         --origin-url "<+pipeline.executionUrl>"
 
-              # <-- KOSLI run the image that was just pushed as a
-              # Background step. Steps of a Kubernetes CI stage share one pod, so
-              # the smoke tests reach it on localhost:8080. No `command`, so the
-              # image's own entrypoint (nginx) starts. Pull Always because tags
-              # are reused (VERSION is edited by hand) — test what was pushed.
-              #
-              # Placed AFTER the decision step on purpose: a failing test fails
-              # the stage, and the approval evidence must already be recorded.
+          infrastructure:
+            type: KubernetesDirect
+            spec:
+              connectorRef: account.SRETrainingCluster
+              # CHANGED: was `simple-app`, which is the namespace the app runs in and
+              # the namespace the Kosli reporter is scoped to. CI pods landing there
+              # get reported as unprovenanced artifacts and flip simple-app-prod to
+              # NON-COMPLIANT during every build. See kosli/HARNESS-NOTES.md.
+              namespace: harness-ci
+              automountServiceAccountToken: true
+              nodeSelector: {}
+              os: Linux
+
+    # <-- KOSLI: smoke tests in their OWN stage. They cannot live in
+    # the Build stage: Harness creates every step container of a Kubernetes CI
+    # stage when the stage STARTS, so an image tag taken from a step output
+    # (Read_Version) is still `null` at that point -> "soniabou/simpleapp:null"
+    # ImagePullBackOff. When this stage starts, Build has finished, so the
+    # pipeline-scoped expressions below are resolved.
+    #
+    # /harness is not shared across stages: the clone (for --repo-root) and the
+    # Kosli CLI are fetched again here. The commit SHA comes from Build, so the
+    # attestation lands on the same trail even if main has moved since.
+    - stage:
+        name: Test
+        identifier: Test
+        type: CI
+        spec:
+          cloneCodebase: false
+          execution:
+            steps:
+              - step:
+                  type: GitClone
+                  name: GitClone_Test
+                  identifier: GitClone_Test
+                  spec:
+                    connectorRef: account.githubsonia
+                    repoName: simpleapp
+                    cloneDirectory: /harness/test
+                    build:
+                      type: branch
+                      spec:
+                        branch: main
+
+              # Runs the image Build pushed. Steps of a Kubernetes CI stage share
+              # one pod, so the tests reach it on localhost:8080. No `command`, so
+              # the image's own entrypoint (nginx) starts. Pull Always because tags
+              # are reused (VERSION is edited by hand) - test what was pushed.
               - step:
                   type: Background
                   name: App Under Test
                   identifier: App_Under_Test
                   spec:
                     connectorRef: account.dockerio
-                    image: soniabou/simpleapp:<+execution.steps.Read_Version.output.outputVariables.APP_VERSION>
+                    image: soniabou/simpleapp:<+pipeline.stages.Build.spec.execution.steps.Read_Version.output.outputVariables.APP_VERSION>
                     imagePullPolicy: Always
 
-              # <-- KOSLI smoke tests against the running image, written
-              # as JUnit XML. `reports` makes Harness show them in the Tests tab;
-              # the same file is attested to Kosli in the next step.
+              # Smoke tests written as JUnit XML. `reports` makes Harness show them
+              # in the Tests tab; the same file is attested to Kosli next.
+              # A failure fails this stage, so the Deploy stage never runs.
               - step:
                   type: Run
                   name: Smoke Tests
@@ -335,7 +375,7 @@ pipeline:
                     shell: Sh
                     command: |-
                       set -u
-                      VER=<+execution.steps.Read_Version.output.outputVariables.APP_VERSION>
+                      VER=<+pipeline.stages.Build.spec.execution.steps.Read_Version.output.outputVariables.APP_VERSION>
                       URL="http://localhost:8080"
                       OUT=/harness/test-results
                       mkdir -p "$OUT"
@@ -349,7 +389,7 @@ pipeline:
                       done
 
                       TESTS=0; FAILS=0; CASES=""
-                      # check NAME EXPECTED ACTUAL — messages stay plain text, no XML escaping needed
+                      # check NAME EXPECTED ACTUAL - messages stay plain text, no XML escaping needed
                       check() {
                         TESTS=$((TESTS+1))
                         if [ "$2" = "$3" ]; then
@@ -370,7 +410,6 @@ pipeline:
                         "$TESTS" "$FAILS" "$CASES" > "$OUT/smoke.xml"
                       cat "$OUT/smoke.xml"
 
-                      # Failing tests fail the step, so the Deploy stage never runs.
                       [ "$FAILS" -eq 0 ]
                     reports:
                       type: JUnit
@@ -378,10 +417,10 @@ pipeline:
                         paths:
                           - /harness/test-results/*.xml
 
-              # <-- KOSLI: record the JUnit results on the trail.
-              # `stageStatus: All` runs this even when Smoke Tests failed — a
-              # failed test run is evidence too, and must reach Kosli as
-              # non-compliant rather than go unreported.
+              # Records the JUnit results on the trail. `stageStatus: All` runs
+              # this even when Smoke Tests failed - a failed run is evidence too,
+              # and must reach Kosli as non-compliant rather than go unreported.
+              # Installs the CLI itself: /harness/bin from Build is not here.
               - step:
                   type: Run
                   name: Kosli Attest JUnit
@@ -398,10 +437,14 @@ pipeline:
                       KOSLI_FLOW: simple-app
                     command: |-
                       set -eu
-                      SHA=<+execution.steps.Kosli_Setup.output.outputVariables.COMMIT_SHA>
+                      KOSLI_VERSION=2.36.1
+                      apk add --no-cache curl >/dev/null
+                      curl -fsSL "https://github.com/kosli-dev/cli/releases/download/v${KOSLI_VERSION}/kosli_${KOSLI_VERSION}_linux_amd64.tar.gz" | tar -xz -C /usr/local/bin kosli
+                      kosli version
+                      SHA=<+pipeline.stages.Build.spec.execution.steps.Kosli_Setup.output.outputVariables.COMMIT_SHA>
                       # `--name` must match the smoke-tests entry in flow-template.yml.
                       # Harness is not an auto-detected CI, so repo metadata is explicit.
-                      /harness/bin/kosli attest junit \
+                      kosli attest junit \
                         --name smoke-tests \
                         --results-dir /harness/test-results \
                         --trail "$SHA" \
@@ -412,19 +455,8 @@ pipeline:
                         --repo-url "https://github.com/SoniaBoussabeh/simpleapp" \
                         --repo-id "1269630228" \
                         --origin-url "<+pipeline.executionUrl>"
-
           infrastructure:
-            type: KubernetesDirect
-            spec:
-              connectorRef: account.SRETrainingCluster
-              # CHANGED: was `simple-app`, which is the namespace the app runs in and
-              # the namespace the Kosli reporter is scoped to. CI pods landing there
-              # get reported as unprovenanced artifacts and flip simple-app-prod to
-              # NON-COMPLIANT during every build. See kosli/HARNESS-NOTES.md.
-              namespace: harness-ci
-              automountServiceAccountToken: true
-              nodeSelector: {}
-              os: Linux
+            useFromStage: Build
 
     - stage:
         name: Deploy
