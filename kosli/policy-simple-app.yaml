@@ -40,7 +40,7 @@ artifacts:
   # PHASE 3 — add per-attestation requirements as the pipeline grows.
   #
   # Each entry must also exist in kosli/flow-template.yml, or it can never be satisfied.
-  # There are currently no tests in this repo, so nothing is listed here yet.
+  # Smoke tests now exist (smoke-tests, type junit) and could be required here.
   #
   # attestations:
   #   - name: pull-request
