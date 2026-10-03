@@ -305,6 +305,114 @@ pipeline:
                         --repo-id "1269630228" \
                         --origin-url "<+pipeline.executionUrl>"
 
+              # <-- KOSLI run the image that was just pushed as a
+              # Background step. Steps of a Kubernetes CI stage share one pod, so
+              # the smoke tests reach it on localhost:8080. No `command`, so the
+              # image's own entrypoint (nginx) starts. Pull Always because tags
+              # are reused (VERSION is edited by hand) — test what was pushed.
+              #
+              # Placed AFTER the decision step on purpose: a failing test fails
+              # the stage, and the approval evidence must already be recorded.
+              - step:
+                  type: Background
+                  name: App Under Test
+                  identifier: App_Under_Test
+                  spec:
+                    connectorRef: account.dockerio
+                    image: soniabou/simpleapp:<+execution.steps.Read_Version.output.outputVariables.APP_VERSION>
+                    imagePullPolicy: Always
+
+              # <-- KOSLI smoke tests against the running image, written
+              # as JUnit XML. `reports` makes Harness show them in the Tests tab;
+              # the same file is attested to Kosli in the next step.
+              - step:
+                  type: Run
+                  name: Smoke Tests
+                  identifier: Smoke_Tests
+                  spec:
+                    connectorRef: account.dockerio
+                    image: alpine:latest
+                    shell: Sh
+                    command: |-
+                      set -u
+                      VER=<+execution.steps.Read_Version.output.outputVariables.APP_VERSION>
+                      URL="http://localhost:8080"
+                      OUT=/harness/test-results
+                      mkdir -p "$OUT"
+
+                      # nginx needs a moment to start; give up after 30s.
+                      i=0
+                      until wget -qO /dev/null "$URL/healthz" 2>/dev/null; do
+                        i=$((i+1))
+                        if [ "$i" -ge 30 ]; then echo "app did not start"; break; fi
+                        sleep 1
+                      done
+
+                      TESTS=0; FAILS=0; CASES=""
+                      # check NAME EXPECTED ACTUAL — messages stay plain text, no XML escaping needed
+                      check() {
+                        TESTS=$((TESTS+1))
+                        if [ "$2" = "$3" ]; then
+                          echo "PASS $1"
+                          CASES="$CASES<testcase classname=\"smoke\" name=\"$1\"/>"
+                        else
+                          echo "FAIL $1: expected $2, got $3"
+                          FAILS=$((FAILS+1))
+                          CASES="$CASES<testcase classname=\"smoke\" name=\"$1\"><failure message=\"expected $2, got $3\"/></testcase>"
+                        fi
+                      }
+
+                      check healthz_returns_ok "ok" "$(wget -qO- "$URL/healthz" 2>/dev/null | tr -d '\r\n')"
+                      check version_matches_VERSION_file "$VER" "$(wget -qO- "$URL/version" 2>/dev/null | tr -d '\r\n')"
+                      check homepage_is_served "200" "$(wget -qO /dev/null "$URL/" 2>/dev/null && echo 200 || echo error)"
+
+                      printf '<?xml version="1.0" encoding="UTF-8"?>\n<testsuites><testsuite name="simple-app-smoke" tests="%s" failures="%s">%s</testsuite></testsuites>\n' \
+                        "$TESTS" "$FAILS" "$CASES" > "$OUT/smoke.xml"
+                      cat "$OUT/smoke.xml"
+
+                      # Failing tests fail the step, so the Deploy stage never runs.
+                      [ "$FAILS" -eq 0 ]
+                    reports:
+                      type: JUnit
+                      spec:
+                        paths:
+                          - /harness/test-results/*.xml
+
+              # <-- KOSLI: record the JUnit results on the trail.
+              # `stageStatus: All` runs this even when Smoke Tests failed — a
+              # failed test run is evidence too, and must reach Kosli as
+              # non-compliant rather than go unreported.
+              - step:
+                  type: Run
+                  name: Kosli Attest JUnit
+                  identifier: Kosli_Attest_JUnit
+                  when:
+                    stageStatus: All
+                  spec:
+                    connectorRef: account.dockerio
+                    image: alpine:latest
+                    shell: Sh
+                    envVariables:
+                      KOSLI_API_TOKEN: <+secrets.getValue("account.kosli_api_token")>
+                      KOSLI_ORG: SDL-Sandbox
+                      KOSLI_FLOW: simple-app
+                    command: |-
+                      set -eu
+                      SHA=<+execution.steps.Kosli_Setup.output.outputVariables.COMMIT_SHA>
+                      # `--name` must match the smoke-tests entry in flow-template.yml.
+                      # Harness is not an auto-detected CI, so repo metadata is explicit.
+                      /harness/bin/kosli attest junit \
+                        --name smoke-tests \
+                        --results-dir /harness/test-results \
+                        --trail "$SHA" \
+                        --commit "$SHA" \
+                        --repo-root /harness/test \
+                        --repo-provider github \
+                        --repository "SoniaBoussabeh/simpleapp" \
+                        --repo-url "https://github.com/SoniaBoussabeh/simpleapp" \
+                        --repo-id "1269630228" \
+                        --origin-url "<+pipeline.executionUrl>"
+
           infrastructure:
             type: KubernetesDirect
             spec:

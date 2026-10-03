@@ -7,6 +7,10 @@ trail:
     # `--name` on `kosli attest decision` must match this entry exactly.
     - name: source-code-review-decision
       type: decision
+    # Smoke tests run against the pushed image in the Harness Build stage (CM-03).
+    # `--name` on `kosli attest junit` must match this entry exactly.
+    - name: smoke-tests
+      type: junit
   artifacts:
     # Required. `kosli attest artifact --name simple-app` is a REFERENCE to this
     # entry, not a declaration — remove it and that step fails, the digest is
